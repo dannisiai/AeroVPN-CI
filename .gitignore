@@ -1,0 +1,87 @@
+# Flutter & Dart
+**/build/
+**/.dart_tool/
+**/.flutter-plugins*
+**/.pub-cache/
+**/.pub/
+**/coverage/
+.widget_preview/
+
+# Android
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+**/android/captures/
+**/android/gradle/
+**/android/.gradle/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+*.keystore
+*.jks
+key.properties
+
+# iOS / macOS
+**/ios/Flutter/.last_build_id
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/macos/Pods/
+**/macos/.symlinks/
+**/macos/Flutter/ephemeral/
+
+# Windows & Binaries
+core/daemon/sing-box.exe
+core/daemon/sing-box.zip
+core/daemon/vpn-daemon.exe
+core/daemon/*.exe~
+client/windows/runner/bin/*.exe
+client/windows/runner/bin/sing-box.exe
+client/windows/runner/bin/wintun.dll
+dist/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+
+# Upstream build artifacts: built from SagerNet/sing-box via
+# scripts/make_libbox_aar.py / make_apple_framework.py / fetch_upstream_cores.*.
+# These stay ignored so the placeholder stubs that once lived here can never be
+# committed by accident. The REAL cores are published by the
+# "Build Upstream Core Artifacts" workflow, which commits them with `git add -f`
+# (single-writer), pinned to the version in core/upstream.env.
+client/android/app/libs/libbox.aar
+client/android/app/libs/classes.jar
+client/ios/Frameworks/Libbox.xcframework/
+client/macos/Runner/sing-box
+
+# Control-plane runtime state (users/sessions/verification codes) - never commit
+backend-spec/db.json
+
+# Upstream clones
+core/upstream/
+
+# Node.js
+**/node_modules/
+**/npm-debug.log*
+
+# System & IDE
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+*.tmp
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Analysis leftovers that must never be committed (they once contained a real
+# node IP); regenerate locally, never check in.
+all_files_content.txt
+summary_data.txt
+extract_info.py
+generate_artifact.py
+
+# Private deployed node credentials
+**/node-config.json

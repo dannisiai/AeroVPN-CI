@@ -1,0 +1,548 @@
+name: Build Multi-Platform Releases (Windows, Android, macOS, iOS)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Jobs to run (push/PR always runs everything; dispatch can target the private-runner-minute hogs)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - android-ios
+          - android-only
+          - ios-only
+          - windows-only
+          - macos-only
+          - backend-only
+      package_only:
+        description: "Build and package only; skip tests and independent verification"
+        required: false
+        default: false
+        type: boolean
+
+# Pinned upstream core version / tags live in core/upstream.env (single source of
+# truth). Every job loads them instead of hardcoding a version, so the desktop
+# binaries, the mobile cores and the generated sing-box config never drift apart.
+
+# Private-repo Actions minutes: Linux x1, Windows x2, macOS x10. The dispatch
+# selector exists so verification loops can run just the needed jobs instead of
+# paying for a full 4-platform sweep every iteration.
+#   full sweep ~= 450-500 min-equiv; android-ios ~= 190; android-only ~= 12.
+
+env:
+  AEROVPN_PACKAGE_ONLY: ${{ inputs.package_only && '1' || '0' }}
+
+jobs:
+  # =========================================================================
+  # 1. Windows: Flutter Client + Go Daemon + Official sing-box + Inno Setup
+  # =========================================================================
+  build-windows:
+    name: Build Windows Installer (.exe)
+    runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'windows-only'
+    env:
+      # single source of truth; the loader step overrides this from core/upstream.env.
+      UPSTREAM_VERSION: v1.14.3
+      UPSTREAM_VERSION_NUMBER: "1.14.3"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Load pinned upstream core version
+        shell: pwsh
+        run: |
+          $line = Get-Content core/upstream.env | Where-Object { $_ -match '^UPSTREAM_VERSION=' } | Select-Object -First 1
+          $version = ($line -replace '^UPSTREAM_VERSION=', '').Trim('"').Trim()
+          $number = $version.TrimStart('v')
+          "UPSTREAM_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "UPSTREAM_VERSION_NUMBER=$number" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Pinned upstream core: $version"
+
+      # core/daemon/go.mod requires go >= 1.26; the toolchain must match.
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+          cache-dependency-path: core/daemon/go.sum
+
+      # `go build .` compiles the whole package (main.go + config_guard.go);
+      # `go build main.go` would silently miss sibling files and fail on
+      # undefined symbols.
+      - name: Test Windows Service Daemon
+        if: inputs.package_only != true
+        run: |
+          cd core/daemon
+          go test ./...
+
+      - name: Compile Privileged Windows Service Daemon
+        run: |
+          cd core/daemon
+          go build -ldflags="-s -w" -o vpn-daemon.exe .
+          cd ../..
+
+      - name: Download Official sing-box Core for Windows x64
+        shell: pwsh
+        run: |
+          $version = $env:UPSTREAM_VERSION
+          $number = $env:UPSTREAM_VERSION_NUMBER
+          Write-Host "Downloading sing-box $version..."
+          $url = "https://github.com/SagerNet/sing-box/releases/download/$version/sing-box-$number-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "sing-box.zip"
+          Expand-Archive -Path "sing-box.zip" -DestinationPath "temp_sb"
+          Copy-Item -Force "temp_sb\sing-box-$number-windows-amd64\sing-box.exe" "core\daemon\sing-box.exe"
+          Remove-Item -Recurse -Force "temp_sb", "sing-box.zip"
+          Get-Item "core\daemon\sing-box.exe" | Select-Object Name, Length
+
+      - name: Verify wintun.dll integrity (official hash pin)
+        if: inputs.package_only != true
+        shell: pwsh
+        run: python scripts/verify_upstream_artifact.py --wintun core/daemon/wintun.dll
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Enable Windows Desktop Support
+        run: flutter config --enable-windows-desktop
+
+      - name: Run Flutter Tests
+        if: inputs.package_only != true
+        run: |
+          cd client
+          flutter pub get
+          flutter test
+          cd ..
+
+      - name: Build Flutter Windows Desktop Client (Release)
+        run: |
+          cd client
+          flutter pub get
+          flutter build windows --release
+          cd ..
+
+      - name: Compile Inno Setup Production Installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "ISCC not in standard path, installing via Chocolatey..."
+            choco install innosetup -y
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Compiling installer with: $iscc"
+          & $iscc installer/aerovpn_installer.iss
+          Get-ChildItem -Path dist
+
+      - name: Upload Windows Production Setup (.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroVPN_Windows_Setup_v1.0.0
+          path: dist/AeroVPN_Setup_v1.0.0.exe
+          if-no-files-found: error
+
+  # =========================================================================
+  # 2. Android: Flutter Client + Native AeroVpnService -> Debug APK (QA artifact)
+  # =========================================================================
+  build-android:
+    name: Build Android Debug (.apk)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'android-ios' || inputs.platforms == 'android-only'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Load pinned upstream build config
+        run: |
+          set -a; source core/upstream.env; set +a
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_BUILD_TAGS=$UPSTREAM_BUILD_TAGS" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_VERSION=$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "Pinned upstream core: $UPSTREAM_VERSION ($UPSTREAM_BUILD_TAGS)"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # gomobile bind (libbox) needs a Go toolchain; sing-box ${UPSTREAM_VERSION} needs >= 1.25.
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Install pinned Android NDK
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${ANDROID_NDK_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK=$SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # The real libbox.aar is produced by the "Build Upstream Core Artifacts" workflow
+      # and committed to this repo. Only build it here if it is missing or a placeholder.
+      - name: Ensure Android Libbox Dependencies
+        run: |
+          AAR="client/android/app/libs/libbox.aar"
+          REBUILD=0
+          if [ ! -f "$AAR" ]; then
+            REBUILD=1
+          else
+            SIZE=$(stat -c%s "$AAR" 2>/dev/null || stat -f%z "$AAR")
+            echo "Existing libbox.aar: ${SIZE} bytes"
+            if [ "$SIZE" -lt 5000000 ]; then
+              echo "Placeholder libbox.aar detected (<5MB, no jni/*.so); building the real core."
+              REBUILD=1
+            fi
+          fi
+          if [ "$REBUILD" -eq 1 ]; then
+            rm -f "$AAR"
+            python3 scripts/make_libbox_aar.py
+          fi
+          # Fail the job (not just warn) if the artifact is still not a usable core.
+          if [ "$AEROVPN_PACKAGE_ONLY" != "1" ]; then
+            python3 scripts/verify_upstream_artifact.py --aar "$AAR"
+          fi
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # No Android signing secrets are wired in CI, and release builds now fail
+      # fast without key.properties instead of silently using debug signing.
+      # Ship an explicitly debug-named artifact for QA rather than a debug-signed
+      # build masquerading as a release.
+      - name: Run Flutter Tests
+        if: inputs.package_only != true
+        run: |
+          cd client
+          flutter pub get
+          flutter test
+          cd ..
+
+      - name: Build Android Debug APK
+        run: |
+          cd client
+          flutter pub get
+          flutter build apk --debug
+          cd ..
+
+      - name: Upload Android Debug APK (.apk)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroVPN_Android_v1.0.0_debug
+          path: client/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+
+  # =========================================================================
+  # 3. macOS: Flutter Desktop App Bundle -> Packaged .zip
+  # =========================================================================
+  build-macos:
+    name: Build macOS Release (.app / .zip)
+    runs-on: macos-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'macos-only'
+    # GitHub forbids `secrets.*` inside a step-level `if:`. Expose a boolean flag at
+    # job level so signing/notarization steps can be gated on it. Requires the
+    # MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD, KEYCHAIN_PASSWORD, APPLE_ID,
+    # APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID secrets to be configured; without
+    # them the job falls back to producing the unsigned artifact as before.
+    env:
+      MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Load pinned upstream core version
+        run: |
+          set -a; source core/upstream.env; set +a
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_VERSION_NUMBER=${UPSTREAM_VERSION#v}" >> "$GITHUB_ENV"
+          echo "MACOS_GO_VERSION=$MACOS_GO_VERSION" >> "$GITHUB_ENV"
+          echo "Pinned upstream core: $UPSTREAM_VERSION"
+
+      - name: Setup pinned Go for macOS core
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.MACOS_GO_VERSION }}
+          cache: false
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Enable macOS Desktop Support
+        run: flutter config --enable-macos-desktop
+
+      - name: Build macOS 13 universal core from pinned source
+        run: |
+          python3 scripts/build_macos_core.py
+
+      - name: Build Flutter macOS Desktop (Release)
+        run: |
+          cd client
+          flutter pub get
+          flutter build macos --release
+          cd ..
+
+      - name: Verify bundled macOS code signatures
+        if: inputs.package_only != true
+        run: |
+          APP=client/build/macos/Build/Products/Release/aerovpn_client.app
+          test -f "$APP/Contents/MacOS/sing-box"
+          codesign --verify --strict --verbose=2 "$APP/Contents/MacOS/sing-box"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Verify macOS architecture coverage
+        if: inputs.package_only != true
+        run: |
+          # codesign changes the bundled core bytes; verify the pinned input before signing.
+          # The Xcode phase verifies this input, copies it, then signs the nested core.
+          python3 scripts/build_macos_core.py --verify client/macos/Runner/sing-box
+          python3 scripts/verify_macos_app.py client/build/macos/Build/Products/Release/aerovpn_client.app
+          xcrun lipo client/build/macos/Build/Products/Release/aerovpn_client.app/Contents/MacOS/sing-box -verify_arch arm64 x86_64
+          xcrun lipo client/build/macos/Build/Products/Release/aerovpn_client.app/Contents/MacOS/aerovpn_client -verify_arch arm64 x86_64
+
+      # The app is deliberately unsandboxed (standalone core design), so App Store
+      # distribution is off the table; Developer ID + notarization is the route.
+      # The steps below only run when the signing secrets are configured.
+      - name: Import Developer ID certificate
+        if: env.MACOS_SIGNING == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "Installed Developer ID signing identity."
+
+      - name: Codesign macOS app (Developer ID)
+        if: env.MACOS_SIGNING == 'true'
+        run: |
+          set -euo pipefail
+          codesign --deep --force --options runtime --timestamp --sign "Developer ID Application" \
+            client/build/macos/Build/Products/Release/aerovpn_client.app
+
+      - name: Archive macOS Application
+        run: |
+          cd client/build/macos/Build/Products/Release
+          ditto -c -k --keepParent aerovpn_client.app AeroVPN-macOS-v1.0.0.zip
+          cd ../../../../..
+
+      - name: Notarize and staple macOS app
+        if: env.MACOS_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP=client/build/macos/Build/Products/Release/aerovpn_client.app
+          ZIP="$RUNNER_TEMP/AeroVPN-macOS-notarize.zip"
+          # ditto preserves the framework symlinks that plain zip can mangle.
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          xcrun notarytool submit "$ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP"
+          # Re-zip the artifact so it contains the stapled app.
+          cd client/build/macos/Build/Products/Release
+          rm -f AeroVPN-macOS-v1.0.0.zip
+          ditto -c -k --keepParent aerovpn_client.app AeroVPN-macOS-v1.0.0.zip
+
+      - name: Verify extracted macOS archive
+        if: inputs.package_only != true
+        run: |
+          VERIFY_DIR=$(mktemp -d "$RUNNER_TEMP/aerovpn-archive-check.XXXXXX")
+          ditto -x -k client/build/macos/Build/Products/Release/AeroVPN-macOS-v1.0.0.zip "$VERIFY_DIR"
+          python3 scripts/verify_macos_app.py "$VERIFY_DIR/aerovpn_client.app"
+          codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/aerovpn_client.app"
+
+      - name: Upload macOS Release (.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroVPN_macOS_v1.0.0
+          path: client/build/macos/Build/Products/Release/AeroVPN-macOS-v1.0.0.zip
+          if-no-files-found: error
+
+  # =========================================================================
+  # 4. Apple iOS: Flutter iOS + PacketTunnel Network Extension (.zip)
+  # =========================================================================
+  build-ios:
+    name: Build iOS Release (.zip / .app)
+    runs-on: macos-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'android-ios' || inputs.platforms == 'ios-only'
+    # GitHub forbids `secrets.*` inside a step-level `if:`. Expose a boolean flag at
+    # job level so signing steps can be gated on it.
+    env:
+      HAS_IOS_SIGNING: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 != '' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Load pinned upstream build config
+        run: |
+          set -a; source core/upstream.env; set +a
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_BUILD_TAGS=$UPSTREAM_BUILD_TAGS" >> "$GITHUB_ENV"
+          echo "Pinned upstream core: $UPSTREAM_VERSION ($UPSTREAM_BUILD_TAGS)"
+
+      # Building Libbox.xcframework requires a Go toolchain (gomobile bind).
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      # The real Libbox.xcframework is produced by the "Build Upstream Core Artifacts"
+# workflow and committed to this repo (private repos cannot pass large binaries
+# between workflows any other way). Only build it here if it is missing.
+      - name: Ensure iOS Network Extension & Libbox Framework
+        run: |
+          if [ ! -f client/ios/Frameworks/Libbox.xcframework/ios-arm64/Libbox.framework/Libbox ]; then
+            echo "Committed Libbox.xcframework not found; building from upstream..."
+            python3 scripts/make_apple_framework.py
+          fi
+          if [ "$AEROVPN_PACKAGE_ONLY" != "1" ]; then
+            python3 scripts/verify_upstream_artifact.py --xcframework client/ios/Frameworks/Libbox.xcframework
+          fi
+          python3 scripts/patch_xcode_project.py
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # Real device installs (not just `--no-codesign`) need an Apple Developer
+      # account with the NetworkExtension capability. iOS builds keep working
+      # unsigned for internal QA; the steps below only run when the signing
+      # secrets are configured. See deploy/CONTROL_PLANE.md for the secret list.
+      - name: Import Apple signing identity
+        if: env.HAS_IOS_SIGNING == 'true'
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          KC_PASSWORD="$(openssl rand -hex 24)"
+          echo "$IOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          security create-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$IOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          UUID=$(security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" | plutil -extract UUID raw -)
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          echo "Installed signing identity and provisioning profile $UUID."
+
+      - name: Build Flutter iOS Release (signed)
+        if: env.HAS_IOS_SIGNING == 'true'
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          cd client
+          flutter pub get
+          # Auto-signed archive: automatic signing picks the imported identity and
+          # provisioning profile; the export options just need the team id.
+          cat > ios/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>development</string>
+            <key>teamID</key><string>${IOS_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>stripSwiftSymbols</key><true/>
+            <key>compileBitcode</key><false/>
+          </dict>
+          </plist>
+          EOF
+          flutter build ipa --release \
+            --export-options-plist=ios/ExportOptions.plist \
+            --build-number=${{ github.run_number }}
+          cd ..
+
+      - name: Build Flutter iOS Release (No Codesign)
+        if: env.HAS_IOS_SIGNING != 'true'
+        run: |
+          echo "::warning::No iOS signing secrets configured - producing an UNSIGNED build for internal QA only."
+          cd client
+          flutter pub get
+          flutter build ios --release --no-codesign
+          cd ..
+
+      - name: Archive iOS Application Bundle
+        run: |
+          if [ -d client/build/ios/ipa ]; then
+            for ipa in client/build/ios/ipa/*.ipa; do
+              cp "$ipa" client/build/ios/ipa/AeroVPN-iOS-v1.0.0.ipa
+            done
+          fi
+          if [ -d client/build/ios/iphoneos ]; then
+            cd client/build/ios/iphoneos
+            zip -r AeroVPN-iOS-v1.0.0.zip Runner.app
+            cd ../../../..
+          fi
+
+      - name: Upload iOS Release Bundle (.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroVPN_iOS_v1.0.0
+          path: client/build/ios/iphoneos/AeroVPN-iOS-v1.0.0.zip
+          if-no-files-found: error
+
+      - name: Upload signed iOS IPA (when signing secrets are present)
+        if: env.HAS_IOS_SIGNING == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroVPN_iOS_v1.0.0_ipa
+          path: client/build/ios/ipa/AeroVPN-iOS-v1.0.0.ipa
+          if-no-files-found: error
+  # =========================================================================
+  # 5. Backend: control-plane regression suite (node --test, stdlib only)
+  # =========================================================================
+  backend-tests:
+    name: Control Plane Tests
+    runs-on: ubuntu-latest
+    if: inputs.package_only != true && (github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'backend-only')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Explicit file: `node --test <dir>` needs a newer Node than the 22.x
+      # runner provides (it tried to require the directory as a module).
+      - name: Run Control Plane Regression Suite
+        run: node --test backend-spec/test/server-cloud.test.js

@@ -1,0 +1,6 @@
+# Production Keystore Configuration for AeroVPN Android Release
+# Copy this file to client/android/key.properties (do NOT commit key.properties to public git)
+storePassword=YourKeystorePassword123!
+keyPassword=YourKeyPassword123!
+keyAlias=aerovpn-release
+storeFile=app/aerovpn-release-key.jks

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Value must match the upstream client entitlement (SagerNet/sing-box-for-apple
+	     SFI/SFI.entitlements): the containing app also declares
+	     `packet-tunnel-provider`. The previous short form `packet-tunnel` is not a
+	     recognised NetworkExtension value and breaks NE profile installation. -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.aerovpn.client</string>
+	</array>
+</dict>
+</plist>

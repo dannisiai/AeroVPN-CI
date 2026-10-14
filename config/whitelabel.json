@@ -1,0 +1,41 @@
+{
+  "brand": {
+    "app_name": "AeroVPN",
+    "brand_name": "AeroVPN Network",
+    "app_id": "com.aerovpn.client",
+    "bundle_id": "com.aerovpn.client",
+    "version": "1.0.0",
+    "build_number": 100,
+    "company_name": "Aero Technologies Inc.",
+    "website": "https://www.aerovpn.com",
+    "support_url": "https://support.aerovpn.com",
+    "privacy_policy_url": "https://www.aerovpn.com/privacy",
+    "terms_of_service_url": "https://www.aerovpn.com/terms"
+  },
+  "api": {
+    "api_base_url": "https://www.ethworldcupcoin.xyz:8443",
+    "fallback_base_urls": [],
+    "direct_domains": ["ethworldcupcoin.xyz", "aerovpn.com", "api.aerovpn.com", ".cn"],
+    "api_timeout_ms": 15000,
+    "token_refresh_threshold_seconds": 300,
+    "ephemeral_credentials_ttl_seconds": 3600
+  },
+  "ui_theme": {
+    "primary_color": "#0066FF",
+    "accent_color": "#0052CC",
+    "success_color": "#10B981",
+    "warning_color": "#F59E0B",
+    "danger_color": "#EF4444",
+    "background_color": "#FAF9F5",
+    "surface_color": "#FAF9F5",
+    "card_border": "#E2DDD1",
+    "text_primary": "#1C1917",
+    "text_secondary": "#57534E"
+  },
+  "defaults": {
+    "kill_switch_enabled": true,
+    "auto_connect_on_launch": false,
+    "bypass_local_lan": true,
+    "preferred_protocol": "auto"
+  }
+}

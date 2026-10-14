@@ -1,0 +1,23 @@
+{
+  "version": "1.14.3",
+  "commit": "7054cac5124465ffdb145870d7c01885566711b1",
+  "go_version": "1.27.1",
+  "build_tags": "with_quic,with_wireguard,with_utls,with_clash_api,with_gvisor,badlinkname,tfogo_checklinkname0",
+  "ldflags": "-s -w -buildid= -checklinkname=0",
+  "assets": {
+    "amd64": {
+      "minimum_macos": "13.0.0",
+      "binary_sha256": "e9bae1a23a749240395a9d1b66ab239eec03ec5c02907ed9a7bdbb2460a1e64f",
+      "cputype": 16777223,
+      "cpusubtype": 3,
+      "alignment": 12
+    },
+    "arm64": {
+      "minimum_macos": "13.0.0",
+      "binary_sha256": "c03530a69ab63e7fba91a4aaa70530e7a9191c22ec7d6c153b87057e3b689318",
+      "cputype": 16777228,
+      "cpusubtype": 0,
+      "alignment": 14
+    }
+  }
+}

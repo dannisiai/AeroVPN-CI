@@ -1,0 +1,125 @@
+name: Build Upstream Core Artifacts (libbox.aar / Libbox.xcframework)
+
+# Builds the REAL sing-box mobile cores on GitHub-hosted runners and commits them
+# into the repository, because the private repo has no way to hand a large binary
+# between jobs otherwise (Actions artifacts upload/download are unavailable on
+# private repos) and a placeholder stub must never reach a release.
+#
+# Run it manually (workflow_dispatch) whenever the pinned upstream version in
+# core/upstream.env changes. The heavy published workflow consumes the committed
+# untracked artifacts via `git add -f`.
+#
+# NOTE: the produced binaries are GPL-3.0 (upstream sing-box) and must not be
+# checked into a public repository; this repository is private by design.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: core-artifacts
+  cancel-in-progress: false
+
+jobs:
+  android-libbox-aar:
+    name: Build libbox.aar (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load pinned upstream build config
+        run: |
+          set -a; source core/upstream.env; set +a
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_BUILD_TAGS=$UPSTREAM_BUILD_TAGS" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_VERSION=$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "GOMOBILE_VERSION=$GOMOBILE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install pinned Android NDK
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${ANDROID_NDK_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK=$SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build real libbox.aar (upstream gomobile, pinned tag)
+        run: |
+          mkdir -p client/android/app/libs
+          rm -f client/android/app/libs/libbox.aar
+          python3 scripts/make_libbox_aar.py
+
+      - name: Commit libbox.aar
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f client/android/app/libs/libbox.aar
+          if git diff --cached --quiet; then
+            echo "libbox.aar unchanged; nothing to commit."
+          else
+            git commit -m "chore(android): build real libbox.aar from upstream ${UPSTREAM_VERSION}"
+            # Another workflow (or the xcframework job) may have pushed first.
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git push
+          fi
+
+  apple-libbox-xcframework:
+    name: Build Libbox.xcframework (iOS/macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load pinned upstream build config
+        run: |
+          set -a; source core/upstream.env; set +a
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_BUILD_TAGS=$UPSTREAM_BUILD_TAGS" >> "$GITHUB_ENV"
+          echo "GOMOBILE_VERSION=$GOMOBILE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Build real Libbox.xcframework (upstream gomobile, pinned tag)
+        run: |
+          mkdir -p client/ios/Frameworks
+          rm -rf client/ios/Frameworks/Libbox.xcframework
+          python3 scripts/make_apple_framework.py
+
+      - name: Commit Libbox.xcframework
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Guard against a stale simulator slice (exceeds GitHub's 100 MB/file limit;
+          # only the device slice is shipped) ever being staged.
+          rm -rf client/ios/Frameworks/Libbox.xcframework/*-simulator
+          git add -f client/ios/Frameworks/Libbox.xcframework
+          if git diff --cached --quiet; then
+            echo "Libbox.xcframework unchanged; nothing to commit."
+          else
+            git commit -m "chore(ios): build real Libbox.xcframework from upstream ${UPSTREAM_VERSION}"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git push
+          fi

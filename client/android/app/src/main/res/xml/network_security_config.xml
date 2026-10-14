@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loopback-only cleartext exception: the traffic telemetry poller in AeroVpnService
+     reads http://127.0.0.1:9090/traffic from the local sing-box Clash API. On
+     targetSdk 28+ the default network security config blocks ALL cleartext (including
+     loopback), which would silently keep the traffic stats at 0. Only loopback is
+     permitted; all remote traffic stays HTTPS-only. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

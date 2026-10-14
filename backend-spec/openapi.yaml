@@ -1,0 +1,384 @@
+openapi: 3.0.3
+info:
+  title: Commercial VPN Control Plane API
+  version: 1.0.0
+  description: Official control plane API specification for commercial sing-box VPN clients.
+servers:
+  - url: http://127.0.0.1:8080/v1
+    description: Local Mock Development Server
+  - url: https://www.ethworldcupcoin.xyz:8443/v1
+    description: Production Cluster Gateway (standard HTTPS 443)
+
+paths:
+  /auth/register:
+    post:
+      summary: Register with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: Registration initiated, verification code sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: integer, example: 0 }
+                  message: { type: string, example: "Verification code sent to your email" }
+                  email: { type: string }
+
+  # /auth/verify-email was REMOVED from the contract: registration verifies the
+  # code directly via /auth/register, and the production control plane never
+  # implemented a separate verify endpoint. Do not reintroduce it without also
+  # implementing it in backend-spec/server-cloud.js.
+
+  /auth/login:
+    post:
+      summary: Authenticate with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                device_info:
+                  $ref: '#/components/schemas/DeviceInfo'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSuccessResponse'
+
+  /auth/refresh:
+    post:
+      summary: Refresh Access Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  refresh_token: { type: string }
+                  expires_in: { type: integer, example: 3600 }
+
+  /auth/logout:
+    post:
+      summary: Revoke the presented session (both tokens)
+      security: [ BearerAuth: [] ]
+      responses:
+        '200':
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+        '401':
+          description: Unauthorized or token expired
+
+  /auth/forgot-password:
+    post:
+      summary: Request password reset email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        '200':
+          description: Reset code sent
+
+  /auth/reset-password:
+    post:
+      summary: Reset password with code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code, new_password]
+              properties:
+                email: { type: string }
+                code: { type: string }
+                new_password: { type: string }
+      responses:
+        '200':
+          description: Password reset successfully
+
+  /account:
+    get:
+      summary: Retrieve current user profile, subscription plan, and device usage
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Account information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string }
+                  email: { type: string }
+                  plan:
+                    type: object
+                    properties:
+                      id: { type: string, example: "plan_pro_annual" }
+                      name: { type: string, example: "Pro Unlimited" }
+                      status: { type: string, enum: [active, expired, trial, suspended], example: "active" }
+                      expires_at: { type: integer, example: 1767225600 }
+                      max_devices: { type: integer, example: 5 }
+                      current_devices: { type: integer, example: 1 }
+                  account_created_at: { type: integer }
+
+  /regions:
+    get:
+      summary: List all available countries and cities with server health
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Regions list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  regions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Region'
+
+  /connect:
+    post:
+      summary: Dispatch best node and return short-lived ephemeral connection credentials
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [region_id]
+              properties:
+                region_id: { type: string, example: "us" }
+                city_id: { type: string, example: "nyc" }
+                protocol_preference: { type: string, enum: [auto, vless, hysteria2], default: "auto", description: "WireGuard and Trojan are not currently configured by the production connect endpoint." }
+                device_id: { type: string }
+      responses:
+        '200':
+          description: Short-lived node credentials and server parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectResponse'
+        '422':
+          description: Requested protocol is not configured for the selected region
+        '503':
+          description: Selected protocol credentials are incomplete for the selected region
+
+  /connect/revoke:
+    post:
+      summary: Revoke this account's live tunnel connect-sessions (all, or by session_id)
+      description: |
+        Marks connect-sessions revoked in the control plane (frees device-quota
+        slots and stops renewal). Node-side enforcement of revocation is a
+        documented limitation: issued credentials remain usable at the node
+        until their TTL expires.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { type: string, description: "omit to revoke all of the account's connect-sessions" }
+      responses:
+        '200':
+          description: Number of connect-sessions revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: integer }
+
+  /connect/sessions:
+    get:
+      summary: List this account's live tunnel connect-sessions
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Connect sessions (device, region, protocol, TTL, revoked flag)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session_id: { type: string }
+                        device_id: { type: string }
+                        region_id: { type: string }
+                        protocol: { type: string }
+                        issued_at: { type: integer }
+                        expires_at: { type: integer }
+                        revoked: { type: boolean }
+
+  /devices:
+    get:
+      summary: List authorized devices
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Device sessions list
+  /devices/revoke:
+    post:
+      summary: Revoke an authorized device session
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_session_id]
+              properties:
+                device_session_id: { type: string }
+      responses:
+        '200':
+          description: Device revoked
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      # NOTE: opaque random bearer tokens (aat_/art_ hex), NOT JWT.
+      # Tokens are server-side session lookups with expiry; no signature verification.
+      bearerFormat: opaque-token
+
+  schemas:
+    DeviceInfo:
+      type: object
+      properties:
+        device_id: { type: string }
+        device_name: { type: string, example: "Windows Desktop" }
+        os: { type: string, example: "windows" }
+        os_version: { type: string }
+        app_version: { type: string, example: "1.0.0" }
+
+    AuthSuccessResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: "Bearer" }
+        expires_in: { type: integer, example: 3600 }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            email: { type: string }
+            plan_status: { type: string, example: "active" }
+        device_session_id: { type: string }
+
+    Region:
+      type: object
+      properties:
+        id: { type: string, example: "us" }
+        name: { type: string, example: "United States" }
+        code: { type: string, example: "US" }
+        flag_emoji: { type: string, example: "🇺🇸" }
+        recommended: { type: boolean, example: true }
+        cities:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, example: "nyc" }
+              name: { type: string, example: "New York" }
+              latency_ms: { type: integer, example: 45 }
+              load_percent: { type: integer, example: 38 }
+              features:
+                type: array
+                items: { type: string }
+                example: ["streaming", "p2p"]
+
+    ConnectResponse:
+      type: object
+      properties:
+        session_id: { type: string, example: "sess_91283" }
+        region_id: { type: string, example: "us" }
+        city_id: { type: string, example: "nyc" }
+        city_name: { type: string, example: "New York" }
+        country_name: { type: string, example: "United States" }
+        country_code: { type: string, example: "US" }
+        virtual_ip: { type: string, example: "104.28.19.45" }
+        expires_at: { type: integer, example: 1728189600 }
+        ttl_seconds: { type: integer, example: 3600 }
+        protocol: { type: string, enum: [vless, trojan, wireguard, hysteria2], example: "vless" }
+        node_spec:
+          type: object
+          description: Ephemeral server node specifications for sing-box config builder
+          properties:
+            server: { type: string, example: "us-nyc-node1.relay.aerovpn.net" }
+            server_port: { type: integer, example: 443 }
+            uuid: { type: string }
+            password: { type: string }
+            flow: { type: string, example: "xtls-rprx-vision" }
+            tls:
+              type: object
+              properties:
+                enabled: { type: boolean, example: true }
+                server_name: { type: string, example: "gateway.cloudflare.com" }
+                reality:
+                  type: object
+                  properties:
+                    public_key: { type: string }
+                    short_id: { type: string }
